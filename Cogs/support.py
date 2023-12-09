@@ -1,18 +1,12 @@
 import discord
-from discord import ForumTag
 from discord.ext import commands
+from discord import ForumTag
 import json
 import asyncio
-import functools
 from datetime import datetime, timezone
-import aiohttp
 import time
-import logging
-
-intents = discord.Intents.default()
-intents.message_content = True
-bot = commands.Bot(command_prefix='!', intents=intents)
-logging.basicConfig(level=logging.INFO)
+from discord.utils import format_dt
+import aiohttp
 
 
 class Support(commands.Cog):
@@ -21,6 +15,8 @@ class Support(commands.Cog):
         self.config = None
         self.headers = None
         self.closed_threads_file = "closed_threads.json"
+        self.session = aiohttp.ClientSession()
+        self.bot.logger.info("Opened aiohttp session in support cog.")
         with open('config.json', 'r') as config_file:
             self.config = json.load(config_file)
 
@@ -34,22 +30,36 @@ class Support(commands.Cog):
             "Authorization": f"Bearer {self.config['SENTRY_API_KEY']}",
         }
 
+    async def cog_unload(self):
+        await self.bot.loop.create_task(self.session.close())
+        self.bot.logger.info("Closed aiohttp session in support cog.")
+
+    async def close(self):
+        if self.session and not self.session.closed:
+            await self.session.close()
+
     async def fetch_issues(self, error_id: str):
         url = (f"{self.config['SENTRY_API_URL']}/projects/{self.config['SENTRY_ORGANIZATION_SLUG']}/"
                f"{self.config['PROJECT_SLUG']}/issues/")
         query_params = {"query": f"error_id:{error_id}"}
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=self.headers, params=query_params) as response:
-                    return await response.json() if response.status == 200 else None
+            async with self.session.get(url, headers=self.headers, params=query_params) as response:
+                if response.status == 200:
+                    json_data = await response.json()
+                    self.bot.logger.info(f"Successfully fetched issues: {json_data}")
+                    return json_data
+                else:
+                    self.bot.logger.warning(f"Failed to fetch issues. Status code: {response.status}")
+                    self.bot.logger.warning(await response.text())
+                    return None
         except Exception as e:
-            logging.error(f"Error fetching issues: {e}")
+            self.bot.logger.error(f"Error fetching issues: {e}")
             return None
 
-    @staticmethod
-    def process_response(issues):
+    def process_response(self, issues):
         if not issues:
+            self.bot.logger.warning("No issues found in response.")
             return None
 
         issue_data = issues[0]
@@ -59,12 +69,14 @@ class Support(commands.Cog):
         last_seen = issue_data.get('lastSeen', 'Last seen not available')
 
         last_seen_dt = datetime.fromisoformat(last_seen.replace('Z', '+00:00')).replace(tzinfo=timezone.utc)
-        last_seen_formatted = discord.utils.format_dt(last_seen_dt, style='R')
+        last_seen_formatted = format_dt(last_seen_dt, style='R')
+
+        self.bot.logger.info(f"Processed issue data: {issue_data}")
 
         return title, value, handled, last_seen_formatted
 
-    @staticmethod
-    async def update_ui(loading, title, value, handled, last_seen, start_time):
+    async def update_ui(self, loading, title, value, handled, last_seen, start_time):
+        self.bot.logger.info("Updating UI with fetched data.")
         embed = discord.Embed(title=f"Sentry Issue: {title}", color=discord.Color.from_rgb(43, 45, 49))
         embed.add_field(name="Value", value=value, inline=False)
         embed.add_field(name="Unhandled", value=handled, inline=False)
@@ -74,47 +86,71 @@ class Support(commands.Cog):
         elapsed_time = (end_time - start_time) * 1000
         time_content = f"Fetched details at {'normal' if elapsed_time < 1900 else 'slow'} speed. ``{elapsed_time}ms``."
         await loading.edit(content=time_content, embed=embed)
+        self.bot.logger.info("UI updated successfully.")
 
-    @commands.hybrid_command(name="sentry", with_app_command=True, description="Get a Sentry issue by error ID")
+    @commands.command(name="sentry", description="Get a Sentry issue by error ID")
     @commands.has_any_role('Support')
     async def sentry(self, ctx, error_id: str):
-        loading = await ctx.send(content=f"Fetching...")
+        loading = await ctx.reply(content=f"Fetching...")
+        self.bot.logger.info(f"Fetching issues for error ID: {error_id}")
+
+        async def fetch_issues_with_retry(error_id_param: str, loading_message, fetch_start_time,
+                                          max_attempts: int = 2, retry_interval: int = 5):
+            for attempt in range(1, max_attempts + 1):
+                issues = await self.fetch_issues(error_id_param)
+                self.bot.logger.info(f"Issues fetched on attempt {attempt}: {issues}")
+
+                if issues is not None:
+                    issue_data = self.process_response(issues)
+                    if issue_data is not None:
+                        self.bot.logger.info("Issue found. Updating UI.")
+                        await self.update_ui(loading_message, *issue_data, start_time=fetch_start_time)
+                        return True
+
+                next_attempt_time = int(time.time()) + retry_interval
+                await loading_message.edit(
+                    content=f"No matching issues found for error ID: {error_id_param}... **Trying again "
+                            f"<t:{next_attempt_time}:R>**.")
+                await asyncio.sleep(retry_interval)
+
+            return False
+
         start_time = time.time()
+        if not await fetch_issues_with_retry(error_id, loading, start_time):
+            await loading.edit(content=f"No matching issues found for error ID: {error_id} after all attempts.")
+            self.bot.logger.warning(f"No matching issues found for error ID: {error_id} after all attempts.")
 
-        for _ in range(1):
-            issues = await self.fetch_issues(error_id)
-            issue_data = self.process_response(issues)
-
-            if issue_data is not None:
-                await self.update_ui(loading, *issue_data, start_time)
-                return
-
-            next_attempt_time = int(time.time()) + 5
-            await loading.edit(
-                content=f"No matching issues found for error ID: {error_id}... **Trying again "
-                        f"<t:{next_attempt_time}:R>**.")
-            await asyncio.sleep(5)
-
-        await loading.edit(content=f"No matching issues found for error ID: {error_id} after all attempts.")
+        self.bot.logger.info("Finished fetching and processing issues.")
 
     @commands.hybrid_command(name='close', aliases=['c'])
     async def close(self, ctx):
         if not await self._validate_context(ctx):
             return
 
-        async with ctx.typing():
-            tags = self._get_tags(ctx)
-            self._append_tags(tags, [1131688319617605835], ["Thread Resolved"])
+        thread = await ctx.guild.fetch_channel(ctx.channel.id)
+        guild = ctx.guild
 
-            if not await self._try_close_thread(ctx, tags):
-                return
+        if not guild:
+            await ctx.reply("Guild information not available.")
+            return
 
-        await self._send_close_message(ctx)
+        owner = await guild.fetch_member(thread.owner_id)
+
+        if not owner:
+            await ctx.reply("Owner not found.")
+            return
+
+        tags = self._get_tags(ctx)
+        self._append_tags(tags, [1131688319617605835], ["Thread Resolved"])
+
+        tasks = [self._try_close_thread(ctx, tags), self._send_close_message(ctx, owner)]
+        await asyncio.gather(*tasks)
+
         self._save_closed_threads()
 
     async def _validate_context(self, ctx):
         try:
-            if ctx.channel.guild.id != 987798554972143728 or ctx.channel.parent_id != 1131680482170507335:
+            if ctx.channel.guild.id != 1173467080075526305 or ctx.channel.parent_id != 1177026577989644358:
                 return False
         except AttributeError:
             await ctx.reply("This command can only be used in support threads.")
@@ -148,12 +184,12 @@ class Support(commands.Cog):
         try:
             await ctx.channel.edit(archived=True, applied_tags=tags, reason='Closing thread and marking as resolved')
         except discord.HTTPException:
-            await ctx.send("An error occurred while closing the thread.")
+            await ctx.reply("An error occurred while closing the thread.")
             return False
 
         return True
 
-    async def _send_close_message(self, ctx):
+    async def _send_close_message(self, ctx, thread_owner):
         embed = discord.Embed(
             title=f'<:success:1178163443170291773> Thread Closed',
             description=f'**{ctx.author.display_name}** has closed this thread.',
@@ -161,8 +197,7 @@ class Support(commands.Cog):
         )
         embed.set_author(name=ctx.author.display_name, icon_url=str(ctx.author.avatar))
 
-        thread_author = ctx.author
-        await ctx.reply(embed=embed, view=Support.ButtonView(thread_author))
+        await ctx.reply(embed=embed, view=Support.ButtonView(self.bot, thread_owner))
 
         self.closed_threads.add(ctx.channel.id)
 
@@ -173,8 +208,7 @@ class Support(commands.Cog):
 
     def _save_closed_threads(self):
         loop = asyncio.get_event_loop()
-        func = functools.partial(self._write_to_file, self.closed_threads_file, list(self.closed_threads))
-        loop.run_in_executor(None, func)
+        loop.call_soon_threadsafe(self._write_to_file, self.closed_threads_file, list(self.closed_threads))
 
     class Questionnaire(discord.ui.Modal, title='✨ Review a Staff Member'):
         name = discord.ui.TextInput(label='Name')
@@ -205,16 +239,18 @@ class Support(commands.Cog):
                                                     ephemeral=True, delete_after=3)
 
     class ButtonView(discord.ui.View):
-        def __init__(self, thread_author, *, timeout=None):
+        def __init__(self, bot_instance, thread_author, *, timeout=None):
             super().__init__(timeout=timeout)
+            self.bot = bot_instance
             self.thread_author = thread_author
 
         @discord.ui.button(label="✨ Submit a Review", style=discord.ButtonStyle.primary)
         async def button_callback(self, interaction: discord.Interaction, _: discord.ui.Button):
-            if interaction.user.id != self.thread_author.id:
+            if interaction.user != self.thread_author:
                 await interaction.response.send_message("Only the thread creator can submit a review. Big L.",
                                                         ephemeral=True, delete_after=3)
-                logging.warning(f"{interaction.user.name} tried to submit a review.")
+                print(interaction.user, self.thread_author)
+                self.bot.logger.warning(f"{interaction.user.name} tried to submit a review.")
             else:
                 await interaction.response.send_modal(Support.Questionnaire())
 
@@ -233,7 +269,7 @@ class Support(commands.Cog):
         async def quick_delete_callback(self, interaction: discord.Interaction, _: discord.ui.Button):
             try:
                 channel = await self.bot.fetch_channel(int(self.channel_id))
-                logging.info(f"Attempting to delete message with ID {self.message_id}")
+                self.bot.logger.info(f"Attempting to delete message with ID {self.message_id}")
 
                 member, message = await asyncio.gather(
                     interaction.guild.fetch_member(interaction.user.id),
@@ -254,12 +290,12 @@ class Support(commands.Cog):
                                                             ephemeral=True, delete_after=3)
 
             except discord.NotFound as e:
-                logging.error(f"Message with ID {self.message_id} not found. Error: {e}")
+                self.bot.logger.error(f"Message with ID {self.message_id} not found. Error: {e}")
             except discord.Forbidden as e:
-                logging.error(f"Bot does not have permission to delete messages in channel {self.channel_id}. "
-                              f"Error: {e}")
+                self.bot.logger.error(f"Bot does not have permission to delete messages in channel {self.channel_id}. "
+                                      f"Error: {e}")
             except Exception as e:
-                logging.error(f"An error occurred: {e}")
+                self.bot.logger.error(f"An error occurred: {e}")
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload):
