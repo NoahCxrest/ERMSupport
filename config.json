@@ -1,0 +1,20 @@
+{
+    "BREAKING_BAD_URL": "https://api.breakingbadquotes.xyz/v1/quotes",
+    "COFFEE_API_URL": "https://coffee.alexflipnote.dev/random.json",
+    "TRONALD_DUMP_API_URL": "https://api.tronalddump.io/random/quote",
+    "REST_COUNTRIES_API_URL": "https://restcountries.com/v3.1/name/",
+    "BORED_API_URL": "https://boredapi.com/api/activity",
+    "MEME_API_URL": "https://meme-api.com/gimme",
+    "AGEIFY_URL": "https://api.agify.io/",
+    "DOG_API_KEY": "Get from The Dog API as a Service",
+    "DOG_API_URL": "https://api.thedogapi.com/v1/images/search",
+    "CAT_API_KEY": "Get from The Cat API as a Service",
+    "CAT_API_URL": "https://api.thecatapi.com/v1/images/search",
+    "SENTRY_API_URL": "https://sentry.io/api/0",
+    "SENTRY_ORGANIZATION_SLUG": "Speaks for itself",
+    "SENTRY_API_KEY": "Get from your services custom privileged integration, can be found in org settings",
+    "PROJECT_SLUG": "The name that appears on projects",
+    "BUZZWORD_API_URL": "https://corporatebs-generator.sameerkumar.website/",
+    "TECH_API_URL":  "https://techy-api.vercel.app/api/text",
+    "INSULT_API_URL": "https://evilinsult.com/generate_insult.php?lang=en&type=text"
+}
