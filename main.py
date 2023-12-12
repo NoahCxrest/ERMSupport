@@ -19,7 +19,7 @@ def load_config():
     return Config
 
 
-BOT_PREFIX = '?'
+BOT_PREFIX = '!'
 LOG_CHANNEL = 1173467080704655515
 
 
@@ -29,6 +29,7 @@ class Bot(commands.AutoShardedBot):
         self.logger = self.setup_logger()
         self.session = None
         self.is_ready = asyncio.Event()
+        self.logger.info("Bot class instantiated.")
 
     @staticmethod
     def setup_logger():
@@ -74,9 +75,8 @@ class Bot(commands.AutoShardedBot):
         await asyncio.gather(*tasks, return_exceptions=True)
 
     async def close(self):
-        if self.session and not self.session.closed:
+        if self.session:
             await self.session.close()
-
         await super().close()
 
 
@@ -113,7 +113,6 @@ async def main():
         await bot.start(Config.TOKEN)
     except asyncio.CancelledError:
         bot.logger.error("The operation was cancelled.")
-        raise
 
 if __name__ == "__main__":
     asyncio.run(main())

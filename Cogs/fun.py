@@ -7,8 +7,7 @@ import aiohttp
 class Fun(commands.Cog):
     def __init__(self, bot_instance):
         self.bot = bot_instance
-        self.session = aiohttp.ClientSession()
-        self.bot.logger.info("Opened aiohttp session in fun cog.")
+        self.session = self.bot.session
         with open('config.json', 'r') as config_file:
             self.config = json.load(config_file)
 
@@ -18,12 +17,8 @@ class Fun(commands.Cog):
             "Accept": 'application/json',
         }
 
-    async def cog_unload(self):
-        await self.bot.loop.create_task(self.session.close())
-        self.bot.logger.info("Closed aiohttp session in fun cog.")
-
     @staticmethod
-    def is_non_empty_list(data):
+    def _is_non_empty_list(data):
         return isinstance(data, list) and bool(data)
 
     async def _fetch_data(self, url, headers=None, data_type='json'):
@@ -40,7 +35,7 @@ class Fun(commands.Cog):
     async def _process_image(self, ctx, data):
         if isinstance(data, str):
             await ctx.reply(data)
-        elif self.is_non_empty_list(data) and isinstance(data[0], dict):
+        elif self._is_non_empty_list(data) and isinstance(data[0], dict):
             image_url = data[0].get("url")
             if image_url:
                 embed = discord.Embed(color=discord.Color.from_rgb(43, 45, 49))
@@ -182,3 +177,4 @@ class Fun(commands.Cog):
 
 async def setup(bot_instance):
     await bot_instance.add_cog(Fun(bot_instance))
+    
