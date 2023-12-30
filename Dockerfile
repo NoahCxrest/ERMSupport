@@ -16,7 +16,7 @@ COPY Cogs /app/Cogs/
 RUN pip freeze > requirements.txt
 
 # Install dependencies
-RUN pip3 install discord python-dotenv psutil motor jishaku -r requirements.txt --no-cache-dir
+RUN pip3 install --no-cache-dir discord python-dotenv psutil motor jishaku -r requirements.txt
 
 # Make port 80 available to the world outside this container
 EXPOSE 80
