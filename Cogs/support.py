@@ -1,4 +1,3 @@
-import discord
 from discord.ext import commands
 from discord import ForumTag
 import json
@@ -6,6 +5,9 @@ import asyncio
 from datetime import datetime, timezone
 from discord.utils import format_dt
 from motor.motor_asyncio import AsyncIOMotorClient
+import re
+from menus import TagListPaginator, ButtonView, DeleteButton
+import discord
 
 
 class Support(commands.Cog):
@@ -16,29 +18,31 @@ class Support(commands.Cog):
         self.client = AsyncIOMotorClient(self.config['MONGO_URI'])
         self.database = self.client["Cronus"]
         self.collection = self.database["threads"]
+        self.tag_collection = self.database["tags"]
         self.headers = {"Authorization": f"Bearer {self.config['SENTRY_API_KEY']}"}
         self.closed_threads = set()
         self.last_report_times = {}
         self.last_reaction_time = datetime.min
+        self.create_indexes()
 
     @staticmethod
     def load_config():
-        with open('config.json', 'r') as config_file:
+        """Load the bots' configuration."""
+        with open('./config.json', 'r') as config_file:
             return json.load(config_file)
 
     async def _fetch_issues(self, error_id: str):
-        url = (f"{self.config['SENTRY_API_URL']}/projects/{self.config['SENTRY_ORGANIZATION_SLUG']}/"
-               f"{self.config['PROJECT_SLUG']}/issues/")
+        """Fetch issues from the Sentry API."""
+        url = f"{self.config['SENTRY_API_URL']}/projects/{self.config['SENTRY_ORGANIZATION_SLUG']}/" \
+              f"{self.config['PROJECT_SLUG']}/issues/"
         query_params = {"query": f"error_id:{error_id}"}
 
         try:
             async with self.session.get(url, headers=self.headers, params=query_params) as response:
                 if response.status == 200:
                     json_data = await response.json()
-                    self.bot.logger.info(f"Successfully fetched issues: {json_data}")
                     return json_data
                 else:
-                    self.bot.logger.warning(f"Failed to fetch issues. Status code: {response.status}")
                     self.bot.logger.warning(await response.text())
                     return None
         except Exception as e:
@@ -46,6 +50,7 @@ class Support(commands.Cog):
             return None
 
     def _process_response(self, issues):
+        """Process the response from the Sentry API."""
         if not issues:
             self.bot.logger.warning("No issues found in response.")
             return None
@@ -59,42 +64,38 @@ class Support(commands.Cog):
         last_seen_dt = datetime.fromisoformat(last_seen.replace('Z', '+00:00')).replace(tzinfo=timezone.utc)
         last_seen_formatted = format_dt(last_seen_dt, style='R')
 
-        self.bot.logger.info(f"Processed issue data: {issue_data}")
-
         return title, value, handled, last_seen_formatted
 
-    async def _update_ui(self, loading, title, value, handled, last_seen):
-        self.bot.logger.info("Updating UI with fetched data.")
+    @staticmethod
+    async def _update_ui(loading, title, value, handled, last_seen):
+        """Update the UI with the issue data."""
         embed = discord.Embed(title=f"Sentry Issue: {title}", color=discord.Color.from_rgb(43, 45, 49))
         embed.add_field(name="Value", value=value, inline=False)
         embed.add_field(name="Unhandled", value=handled, inline=False)
         embed.add_field(name="Last Seen", value=last_seen, inline=False)
         await loading.edit(content=None, embed=embed)
-        self.bot.logger.info("UI updated successfully.")
 
-    @commands.command(name="sentry", description="Get a Sentry issue by error ID")
+    @commands.hybrid_command(name="sentry", description="Get a Sentry issue by error ID")
     @commands.has_any_role('Support')
     async def sentry(self, ctx, error_id: str):
+        """Get a Sentry issue by error ID."""
         loading = await ctx.reply(content=f"Fetching...")
-        self.bot.logger.info(f"Fetching issues for error ID: {error_id}")
 
         async def _fetch_issues_with_retry(
                 error_id_param: str,
-                max_attempts: int = 5,
-                initial_retry_interval: int = 5,
+                max_attempts: int = 4,
+                initial_retry_interval: int = 2,
         ):
             for attempt in range(1, max_attempts + 1):
                 issues = await self._fetch_issues(error_id_param)
-                self.bot.logger.info(f"Issues fetched on attempt {attempt}: {issues}")
 
                 if issues is not None:
                     issue_data = self._process_response(issues)
                     if issue_data is not None:
-                        self.bot.logger.info("Issue found. Updating UI.")
                         await self._update_ui(loading, *issue_data)
                         return True
 
-                retry_interval = initial_retry_interval * 2 ** (attempt - 1)
+                retry_interval = initial_retry_interval * 1.3 ** (attempt - 1)
                 await loading.edit(
                     content=f"No matching issues found for error ID: {error_id_param}... **Retrying in "
                             f"{retry_interval} seconds**."
@@ -107,47 +108,45 @@ class Support(commands.Cog):
             await loading.edit(content=f"No matching issues found for error ID: {error_id} after all attempts.")
             self.bot.logger.warning(f"No matching issues found for error ID: {error_id} after all attempts.")
 
-        self.bot.logger.info("Finished fetching and processing issues.")
-
-    @commands.hybrid_command(name='close', aliases=['c'])
+    @commands.hybrid_command(name='close', aliases=['c'], with_app_command=True, description='Close a support thread')
     async def close(self, ctx):
         if not await self._validate_context(ctx):
             return
 
-        thread_data = {
-            "thread_id": ctx.channel.id,
-        }
-
-        # Defer the response here
+        thread_data = {"thread_id": ctx.channel.id}
         await ctx.defer()
-        print("Response deferred.")
 
-        thread = await ctx.guild.fetch_channel(ctx.channel.id)
-        guild = ctx.guild
+        try:
+            thread = await ctx.guild.fetch_channel(ctx.channel.id)
+            guild = ctx.guild
+            if not guild:
+                raise ValueError("Guild information not available.")
 
-        if not guild:
-            await ctx.reply("Guild information not available.")
-            return
+            owner = await guild.fetch_member(thread.owner_id)
+            if not owner:
+                raise ValueError("Owner not found.")
 
-        owner = await guild.fetch_member(thread.owner_id)
+            tags = self._get_tags(ctx)
+            self._append_tags(tags, [1131688319617605835], ["Thread Resolved"])
 
-        if not owner:
-            await ctx.reply("Owner not found.")
-            return
+            success = await self._try_close_thread(ctx, tags)
+            if success:
+                await self._send_close_message(ctx, ctx.author)
 
-        tags = self._get_tags(ctx)
-        self._append_tags(tags, [1131688319617605835], ["Thread Resolved"])
+            await self._save_closed_threads(thread_data)
 
-        success = await self._try_close_thread(ctx, tags)
-        if success:
-            await self._send_close_message(ctx, ctx.author)
+        except ValueError as e:
+            await self._reply_error(ctx, str(e))
 
-        await self._save_closed_threads(thread_data)
-        print("Close command completed.")
+    @staticmethod
+    async def _reply_error(ctx, message):
+        embed = discord.Embed(title="Error", description=message, color=0xFF0000)
+        await ctx.reply(embed=embed)
 
     async def _validate_context(self, ctx):
+        """Validate the context of the command."""
         try:
-            if ctx.channel.guild.id != 1173467080075526305 or ctx.channel.parent_id != 1177026577989644358:
+            if ctx.channel.guild.id != 987798554972143728 and ctx.channel.parent_id != 1131680482170507335:
                 return False
         except AttributeError:
             await ctx.reply("This command can only be used in support threads.")
@@ -165,11 +164,13 @@ class Support(commands.Cog):
 
     @staticmethod
     def _get_tags(ctx):
+        """Get the tags to apply to the thread."""
         tags_to_remove = ['Awaiting Support', 'Developers Required', 'Thread Paused']
         return [tag for tag in ctx.channel.applied_tags if tag.name not in tags_to_remove]
 
     @staticmethod
     def _append_tags(tags, tag_ids, tag_names):
+        """Append tags to the list of tags."""
         for tag_id, tag_name in zip(tag_ids, tag_names):
             tag = ForumTag(name=tag_name)
             tag.id = tag_id
@@ -178,10 +179,12 @@ class Support(commands.Cog):
 
     @staticmethod
     async def _try_close_thread(ctx, tags):
+        """Attempt to close the thread."""
         try:
             await asyncio.wait_for(
                 ctx.channel.edit(archived=True, applied_tags=tags, reason='Closing thread and marking as resolved'),
-                timeout=10)
+                timeout=10
+            )
         except asyncio.TimeoutError:
             await ctx.reply("The operation timed out.")
             return False
@@ -191,144 +194,59 @@ class Support(commands.Cog):
         return True
 
     async def _send_close_message(self, ctx, thread_owner):
+        """Send a message to the thread owner indicating that the thread has been closed."""
         embed = discord.Embed(
-            title=f'<:success:1178163443170291773> Thread Closed',
+            title='<:success:1178163443170291773> Thread Closed',
             description=f'**{ctx.author.display_name}** has closed this thread.',
             color=0x65d07d,
         )
         embed.set_author(name=ctx.author.display_name, icon_url=str(ctx.author.avatar))
 
-        await ctx.send(embed=embed, view=Support.ButtonView(self.bot, thread_owner))
+        # Use ButtonView directly
+        await ctx.send(embed=embed, view=ButtonView(self.bot, thread_owner))
 
         self.closed_threads.add(ctx.channel.id)
 
     async def _save_closed_threads(self, thread_data):
+        """Save the thread ID to the database."""
         thread_id = thread_data["thread_id"]
         self.closed_threads.add(thread_id)
 
         await self._write_to_mongodb(thread_id)
 
     async def _write_to_mongodb(self, thread_id):
+        """Write the thread ID to MongoDB."""
         await self.collection.insert_one({"thread_id": thread_id})
-
-    class Questionnaire(discord.ui.Modal, title='✨ Review a Staff Member'):
-        name = discord.ui.TextInput(label='Name')
-        answer = discord.ui.TextInput(label='Answer', style=discord.TextStyle.paragraph)
-        rating = discord.ui.TextInput(label='Rating')
-
-        async def on_submit(self, interaction: discord.Interaction):
-            rating = max(1, min(int(self.rating.value), 5))
-            stars = '⭐' * rating
-
-            embed = discord.Embed(
-                title=f'{interaction.user.display_name} responded with:',
-                color=discord.Color.from_rgb(43, 45, 49),
-            )
-            embed.add_field(name='Note', value=self.answer.value, inline=False)
-            embed.add_field(name='Rating', value=stars, inline=False)
-            channel_id = 1037896352484565053
-            review_channel = interaction.guild.get_channel(channel_id)
-
-            if review_channel:
-                await review_channel.send(content=f"<#{interaction.channel.id}>", embed=embed)
-            else:
-                await interaction.response.send_message("Error: Review channel not found.",
-                                                        ephemeral=True, delete_after=3)
-
-            await interaction.response.send_message("Your review has been submitted.",
-                                                    ephemeral=True, delete_after=3)
-
-    class ButtonView(discord.ui.View):
-        def __init__(self, bot_instance, thread_author, *, timeout=None):
-            super().__init__(timeout=timeout)
-            self.bot = bot_instance
-            self.thread_author = thread_author
-
-        @discord.ui.button(label="✨ Submit a Review", style=discord.ButtonStyle.primary)
-        async def button_callback(self, interaction: discord.Interaction, _: discord.ui.Button):
-            if interaction.user != self.thread_author:
-                await interaction.response.send_message("Only the thread creator can submit a review. Big L.",
-                                                        ephemeral=True, delete_after=3)
-                print(interaction.user, self.thread_author)
-                self.bot.logger.warning(f"{interaction.user.name} tried to submit a review.")
-            else:
-                await interaction.response.send_modal(Support.Questionnaire())
-
-    class DeleteButton(discord.ui.View):
-        allowed_role_id = 988055417907200010
-
-        def __init__(self, bot_instance, message_id, channel_id, response_message, jump_url, *, timeout=None):
-            super().__init__(timeout=timeout)
-            self.bot = bot_instance
-            self.message_id = message_id
-            self.channel_id = channel_id
-            self.response_message = response_message
-            self.jump_url = jump_url
-
-        @discord.ui.button(label="Quick Delete", style=discord.ButtonStyle.red)
-        async def quick_delete_callback(self, interaction: discord.Interaction, _: discord.ui.Button):
-            try:
-                channel = await self.bot.fetch_channel(int(self.channel_id))
-                self.bot.logger.info(f"Attempting to delete message with ID {self.message_id}")
-
-                member, message = await asyncio.gather(
-                    interaction.guild.fetch_member(interaction.user.id),
-                    channel.fetch_message(self.message_id),
-                )
-
-                if self.allowed_role_id in [role.id for role in member.roles]:
-                    deletion_tasks = [
-                        self.response_message.delete(),
-                        message.delete(),
-                        interaction.message.delete()
-                    ]
-                    await asyncio.gather(*deletion_tasks)
-
-                    self.stop()
-                else:
-                    await interaction.response.send_message("You do not have the required role to delete this message.",
-                                                            ephemeral=True, delete_after=3)
-
-            except discord.NotFound as e:
-                self.bot.logger.error(f"Message with ID {self.message_id} not found. Error: {e}")
-            except discord.Forbidden as e:
-                self.bot.logger.error(f"Bot does not have permission to delete messages in channel {self.channel_id}. "
-                                      f"Error: {e}")
-            except Exception as e:
-                self.bot.logger.error(f"An error occurred: {e}")
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload):
-        self.bot.logger.info(f"Reaction added. Message ID: {payload.message_id}")
-
         now = datetime.now()
-        if (now - self.last_reaction_time).total_seconds() < 120:
-            self.bot.logger.info("Reaction added too soon. Ignoring.")
+        cooldown_time = 120
+        report_cooldown_time = 20 * 60
+        report_channel_id = 988056281900257300
+
+        if (now - self.last_reaction_time).total_seconds() < cooldown_time:
             return
 
         self.last_reaction_time = now
 
         if str(payload.emoji) != '⚠️':
+            self.bot.logger.warning(f"Unexpected emoji: {payload.emoji}")
             return
 
         if payload.message_id in self.last_report_times:
             time_since_last_report = now - self.last_report_times[payload.message_id]
-            self.bot.logger.info(f"Time since last report: {time_since_last_report.total_seconds()}")
-            if time_since_last_report.total_seconds() < 20 * 60:
+            if time_since_last_report.total_seconds() < report_cooldown_time:
                 return
 
         user, channel, original_message = await self._fetch_user_channel_message(payload)
-        if not user or not channel or not original_message:
+        if not user or not channel or not original_message or user.bot:
             return
 
-        if user.bot:
-            return
-
-        report_channel = self.bot.get_channel(988056281900257300)
+        report_channel = self.bot.get_channel(report_channel_id)
         if report_channel is None:
             return
 
-        self.bot.logger.info("Creating report.")
         jump_url = original_message.jump_url
         embed = self._create_report_embed(user)
         response_message = await report_channel.send(
@@ -336,7 +254,7 @@ class Support(commands.Cog):
             embed=embed,
         )
 
-        delete_button_view = Support.DeleteButton(
+        delete_button_view = DeleteButton(
             bot_instance=self.bot,
             message_id=payload.message_id,
             channel_id=payload.channel_id,
@@ -350,17 +268,15 @@ class Support(commands.Cog):
         )
 
         self.last_report_times[payload.message_id] = now
-        self.bot.logger.info(f"Report created. Message ID: {payload.message_id}, Time: {now}")
         await delete_button_view.wait()
         await self._delete_messages(original_message, response_message, quick_delete_message)
-        self.bot.logger.info("Report created and messages deleted.")
 
     async def _fetch_user_channel_message(self, payload):
         try:
             user = await self.bot.fetch_user(payload.user_id)
             channel = await self.bot.fetch_channel(payload.channel_id)
-            original_message = await channel.fetch_message(payload.message_id)
-            return user, channel, original_message
+            message = await channel.fetch_message(payload.message_id)
+            return user, channel, message
         except discord.errors.NotFound:
             return None, None, None
 
@@ -379,6 +295,167 @@ class Support(commands.Cog):
                 await message.delete()
             except discord.errors.NotFound:
                 continue
+
+    def create_indexes(self):
+        """Create indexes for the tag collection."""
+        self.tag_collection.create_index([("name", 1)], unique=True)
+
+    @staticmethod
+    def get_tag_query(tag_name: str):
+        """Generate a MongoDB query for retrieving a tag by name."""
+        escaped_tag_name = re.escape(tag_name)
+        return {"name": {"$regex": f"^{escaped_tag_name}$", "$options": "i"}}
+
+    async def run_tag_command(self, message, tag_name: str, target_message_id: int = None):
+        try:
+            query = self.get_tag_query(tag_name)
+            tag_document = await self.tag_collection.find_one(query)
+
+            if not tag_document:
+                if isinstance(message, commands.Context):
+                    return await message.send(f"Tag '{tag_name}' not found.")
+
+                return
+
+            tag_content = tag_document.get("content", "No content available")
+
+            target_message_id = (
+                message.reference.message_id if getattr(message, 'reference', None) else target_message_id
+            )
+
+            try:
+                if isinstance(message, commands.Context):
+                    await message.message.delete()
+                elif hasattr(message, 'delete'):
+                    await message.delete()
+            except discord.Forbidden:
+                pass
+
+            if target_message_id:
+                try:
+                    target_message = await message.channel.fetch_message(target_message_id)
+                    await target_message.reply(tag_content)
+                except discord.NotFound:
+                    await message.channel.send("Target message not found.")
+            else:
+                await message.channel.send(tag_content)
+
+        except Exception as e:
+            await message.channel.send(f"An error occurred while processing the tag: {str(e)}")
+
+    @staticmethod
+    async def check_permissions(ctx):
+        support_role = discord.utils.get(ctx.author.roles, name='Support')
+        return support_role is not None
+
+    @commands.hybrid_group(name='tag', description='Tag commands', case_insensitive=True)
+    async def tag_command(self, ctx, tag_name: str = None):
+        if tag_name:
+            await self.run_tag_command(ctx, tag_name)
+        elif not ctx.invoked_subcommand:
+            await ctx.send("Invalid tag command. Use `!help tag` for more information.")
+
+    @commands.has_any_role('Support')
+    @tag_command.command(name='create', description='Create a new tag')
+    async def create_tag(self, ctx, tag_name: str, *, tag_content: str):
+        query = self.get_tag_query(tag_name)
+        existing_tag = await self.tag_collection.find_one(query)
+
+        if existing_tag:
+            return await ctx.send(f"A tag with the name '{tag_name}' already exists.")
+
+        tag_data = {"author_id": ctx.author.id, "name": tag_name, "content": tag_content}
+        await self.tag_collection.update_one(query, {"$set": tag_data}, upsert=True)
+        await ctx.send(f"Tag '{tag_name}' created successfully!")
+
+    async def edit_or_delete_tag(self, ctx, tag_name: str, new_tag_content: str = None, delete: bool = False):
+        query = self.get_tag_query(tag_name)
+        existing_tag = await self.tag_collection.find_one(query)
+
+        if existing_tag:
+            if await self.check_permissions(ctx):
+                if delete:
+                    await self.tag_collection.delete_one(query)
+                    await ctx.send(f"Tag '{tag_name}' deleted successfully!")
+                else:
+                    update_query = {"$set": {"content": new_tag_content}}
+                    await self.tag_collection.update_one(query, update_query)
+                    await ctx.send(f"Tag '{tag_name}' edited successfully!")
+            else:
+                await ctx.send("You don't have permission to perform this action.")
+        else:
+            await ctx.send(f"Tag '{tag_name}' not found.")
+
+    @tag_command.command(name='list', description='List all tags')
+    async def list_tags(self, ctx):
+        all_tags = await self.tag_collection.find().to_list(length=None)
+
+        if not all_tags:
+            return await ctx.send("No tags found.")
+
+        pages = []
+        for tag in all_tags:
+            tag_name = tag["name"]
+            tag_content = tag.get("content", "No content available")
+            author_id = tag.get("author_id", "Unknown")
+            author_mention = f"<@{author_id}>" if author_id != "Unknown" else "Unknown"
+
+            content = f"**Content:**\n > {tag_content}\n**Author:**\n >>> {author_mention}"
+            embed = discord.Embed(title=tag_name, description=content, color=discord.Color.from_rgb(43, 45, 49))
+            embed.set_author(name="Tag List", icon_url=str(ctx.guild.icon))
+            pages.append(embed)
+
+        # Create a paginator view
+        paginator = TagListPaginator(bot=self.bot, pages=pages)
+        await paginator.start(ctx)
+
+    @tag_command.command(name='all', description='List all tags in the server')
+    async def list_all_tags(self, ctx):
+        all_tags = await self.tag_collection.find().to_list(length=None)
+
+        if not all_tags:
+            return await ctx.send("No tags found.")
+
+        tags_list = ", ".join(f"`{tag['name']}`" for tag in all_tags)
+        embed = discord.Embed(
+            title="Tag List",
+            description=tags_list,
+            color=discord.Color.from_rgb(43, 45, 49)
+        )
+        embed.set_author(name="All Tags", icon_url=str(ctx.guild.icon))
+        await ctx.send(embed=embed)
+
+    @commands.has_any_role('Support')
+    @tag_command.command(name='edit', description='Edit an existing tag')
+    async def edit_tag(self, ctx, tag_name: str, *, new_tag_content: str):
+        await self.edit_or_delete_tag(ctx, tag_name, new_tag_content)
+
+    @commands.has_any_role('Support')
+    @tag_command.command(name='delete', description='Delete an existing tag')
+    async def delete_tag(self, ctx, tag_name: str):
+        await self.edit_or_delete_tag(ctx, tag_name, delete=True)
+
+    @commands.Cog.listener()
+    async def on_message(self, message):
+        if message.author.bot:
+            return
+
+        if message.content.startswith('!'):
+            tag_name = message.content[1:].strip()
+
+            if tag_name:
+                try:
+                    if ' ' not in tag_name:
+                        await self.run_tag_command(message, tag_name)
+                    else:
+                        await self.run_tag_command(message, f"tag {tag_name}")
+                except discord.errors.HTTPException as e:
+                    if "No matching document" in str(e):
+                        pass
+                    else:
+                        await message.channel.send(f"An error occurred while processing the tag: {str(e)}")
+                except AttributeError as attr_error:
+                    await message.channel.send(f"An error occurred while processing the tag: {str(attr_error)}")
 
 
 async def setup(bot_instance):
