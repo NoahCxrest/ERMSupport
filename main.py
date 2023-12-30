@@ -6,6 +6,7 @@ import logging
 import asyncio
 import aiohttp
 import time
+import json
 
 load_dotenv()
 
@@ -19,20 +20,24 @@ def load_config():
     return Config
 
 
-BOT_PREFIX = '!'
-LOG_CHANNEL = 1173467080704655515
+BOT_PREFIX = '.'
 
 
 class Bot(commands.AutoShardedBot):
     def __init__(self, *args, **kwargs):
+        """Initializes the bot."""
         super().__init__(*args, **kwargs)
+        self.commands_cache = {}
         self.logger = self.setup_logger()
         self.session = None
         self.is_ready = asyncio.Event()
         self.logger.info("Bot class instantiated.")
+        with open('config.json', 'r') as config_file:
+            self.config = json.load(config_file)
 
     @staticmethod
     def setup_logger():
+        """Sets up the logger."""
         logger = logging.getLogger(__name__)
         handler = logging.StreamHandler()
         formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -42,6 +47,7 @@ class Bot(commands.AutoShardedBot):
         return logger
 
     async def on_ready(self):
+        """Called when the bot is ready."""
         start_time = time.time()
         self.session = aiohttp.ClientSession()
 
@@ -49,16 +55,14 @@ class Bot(commands.AutoShardedBot):
         elapsed_time = (time.time() - start_time) * 1000
         self.logger.info(f"Bot is ready. Took {elapsed_time}ms")
 
-        log_channel = self.get_channel(LOG_CHANNEL)
-        if log_channel is not None:
-            await log_channel.send(f"Bot is ready. Took {elapsed_time}ms")
-        else:
-            self.logger.warning(f"Log channel not found: {LOG_CHANNEL}")
-
         await self.load_extensions()
+        await self.cache_commands()
+        await self.set_presence()
+
         self.is_ready.set()
 
     async def load_extensions(self):
+        """Loads all extensions."""
         self.logger.debug("Loading extensions...")
         extensions = [filename[:-3] for filename in os.listdir(os.path.join('Cogs')) if filename.endswith('.py')]
 
@@ -74,7 +78,34 @@ class Bot(commands.AutoShardedBot):
 
         await asyncio.gather(*tasks, return_exceptions=True)
 
+    async def cache_commands(self):
+        """Caches all commands and their descriptions. This is used for the help command."""
+        url = f"https://discord.com/api/v10/applications/{self.user.id}/commands"
+        headers = {"Authorization": f"Bot {self.http.token}"}
+        params = {"with_localizations": "True"}
+
+        async with self.session.get(url, headers=headers, params=params) as response:
+            response.raise_for_status()
+            app_commands = await response.json()
+
+        commands_by_cog = {}
+        for command in app_commands:
+            cmd = self.get_command(command['name'])
+            cog_name = cmd.cog_name if cmd else 'No Cog'
+            command_description = f"</{command['name']}:{command['id']}> - {command['description']}"
+            commands_by_cog.setdefault(cog_name, []).append(command_description)
+
+        self.commands_cache = commands_by_cog
+        self.logger.info(f"Commands cached: {commands_by_cog}")
+
+    async def set_presence(self):
+        """Sets the bots presence."""
+        await self.wait_until_ready()
+        await self.change_presence(activity=discord.Game(name="with ERM Systems"))
+        self.logger.info(f"Presence was set to {self.activity}{self.activity.name}")
+
     async def close(self):
+        """Closes the aiohttp.ClientSession."""
         if self.session:
             await self.session.close()
         await super().close()
@@ -82,11 +113,12 @@ class Bot(commands.AutoShardedBot):
 
 intents = discord.Intents.default()
 intents.message_content = True
-bot = Bot(command_prefix=BOT_PREFIX, intents=intents)
+bot = Bot(command_prefix=BOT_PREFIX, intents=intents, help_command=None)
 
 
 @bot.event
 async def on_command_error(ctx, error):
+    """Called when an error occurs while invoking a command."""
     if isinstance(error, commands.CommandNotFound):
         bot.logger.warning(f"Command not found: {ctx.message.content}")
         return
@@ -95,17 +127,15 @@ async def on_command_error(ctx, error):
         await ctx.reply("You're missing some arguments.")
         return
 
+    if isinstance(error, commands.NoPrivateMessage):
+        await ctx.send("This command cannot be used in direct messages.")
+        return
+
     if hasattr(ctx.command, 'on_error'):
         return
 
     error_message = f"Something went wrong. 👇\n* {str(error)}"
     await ctx.reply(content=error_message)
-
-    error_channel = bot.get_channel(LOG_CHANNEL)
-    if error_channel is not None:
-        await error_channel.send(content=error_message)
-    else:
-        bot.logger.warning(f"Error channel not found: {LOG_CHANNEL}")
 
 
 async def main():
