@@ -17,4 +17,9 @@
     "BUZZWORD_API_URL": "https://corporatebs-generator.sameerkumar.website/",
     "TECH_API_URL":  "https://techy-api.vercel.app/api/text",
     "INSULT_API_URL": "https://evilinsult.com/generate_insult.php?lang=en&type=text"
+    "MONGO_URI": "Get from MongoDB Atlas panel",
+    "JOKE_API_URL": "https://v2.jokeapi.dev/joke/Any",
+    "FACT_API_URL": "https://uselessfacts.jsph.pl/random.json?language=en",
+    "QUOTE_API_URL": "https://api.quotable.io/random",
+    "URBAN_DICTIONARY_API_URL": "https://api.urbandictionary.com/v0/define?term="
 }
