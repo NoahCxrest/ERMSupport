@@ -2,20 +2,31 @@ import discord
 from discord.ext import commands
 import json
 import aiohttp
+import logging
 
 
 class Fun(commands.Cog):
     def __init__(self, bot_instance):
         self.bot = bot_instance
-        self.session = self.bot.session
-        with open('config.json', 'r') as config_file:
-            self.config = json.load(config_file)
+        self.session = aiohttp.ClientSession()
+        self.logger = logging.getLogger(__name__)
+
+        # Load configuration from config.json
+        self.config = self.load_config()
 
         self.headers = {
             "Dog-API": self.config["DOG_API_KEY"],
             "Cat-API": self.config["CAT_API_KEY"],
             "Accept": 'application/json',
         }
+
+    @staticmethod
+    def load_config():
+        with open('./config.json', 'r') as config_file:
+            return json.load(config_file)
+
+    def cog_unload(self):
+        self.bot.loop.create_task(self.session.close())
 
     @staticmethod
     def _is_non_empty_list(data):
@@ -29,7 +40,7 @@ class Fun(commands.Cog):
                 else:
                     return f"Error fetching API.\n* **Status Code:** {response.status}"
         except aiohttp.ClientError as e:
-            self.bot.logger.error(f"Request error: {e}")
+            self.logger.error(f"Request error: {e}")
             return f"Error fetching API. Please try again later."
 
     async def _process_image(self, ctx, data):
@@ -71,6 +82,31 @@ class Fun(commands.Cog):
                 await ctx.reply(embed=embed)
             else:
                 await ctx.reply("Error extracting phrase from Buzzword API response.")
+
+    @commands.hybrid_command(name="joke", with_app_command=True, description="Get a random joke")
+    async def joke(self, ctx):
+        joke_data = await self._fetch_data(self.config['JOKE_API_URL'])
+        if isinstance(joke_data, str):
+            await ctx.reply(joke_data)
+        else:
+            joke_type = joke_data.get("type")
+            if joke_type == "single":
+                joke = joke_data.get("joke")
+            elif joke_type == "twopart":
+                joke = f"{joke_data.get('setup')} - {joke_data.get('delivery')}"
+            else:
+                joke = None
+
+            if joke:
+                embed = discord.Embed(
+                    description=joke,
+                    color=discord.Color.from_rgb(43, 45, 49)
+                )
+                embed.set_footer(text=f"Joke type: {joke_type} - This API is known to not produce very kind jokes. "
+                                      f"ERM is not responsible for the content of the jokes.")
+                await ctx.reply(embed=embed)
+            else:
+                await ctx.reply("Error extracting joke from Joke API response.")
 
     @commands.hybrid_command(name="dog", with_app_command=True, description="Get a random dog image")
     async def dog(self, ctx):
@@ -174,7 +210,54 @@ class Fun(commands.Cog):
             embed.set_author(name="Donald Trump")
             await ctx.reply(embed=embed)
 
+    @commands.hybrid_command(name="fact", with_app_command=True, description="Get a random fact")
+    async def fact(self, ctx):
+        fact_data = await self._fetch_data(self.config['FACT_API_URL'])
+        if isinstance(fact_data, str):
+            await ctx.reply(fact_data)
+        else:
+            fact_response = fact_data.get("text", "No fact available")
+            embed = discord.Embed(
+                description=fact_response,
+                color=discord.Color.from_rgb(43, 45, 49)
+            )
+            await ctx.reply(embed=embed)
+
+    @commands.hybrid_command(name="quote", with_app_command=True, description="Get a random quote")
+    async def quote(self, ctx):
+        quote_data = await self._fetch_data(self.config['QUOTE_API_URL'])
+        if isinstance(quote_data, str):
+            await ctx.reply(quote_data)
+        else:
+            quote_response = quote_data.get("content", "No quote available")
+            quote_author = quote_data.get("author", "No author available")
+            embed = discord.Embed(
+                description=f"'{quote_response}' - {quote_author}",
+                color=discord.Color.from_rgb(43, 45, 49)
+            )
+            await ctx.reply(embed=embed)
+
+    @commands.hybrid_command(name="urban", with_app_command=True, description="Get a definition from Urban Dictionary")
+    async def urban(self, ctx, *, term):
+        term = term.replace(" ", "+")
+        url = f"{self.config['URBAN_DICTIONARY_API_URL']}{term}"
+        urban_data = await self._fetch_data(url)
+        if isinstance(urban_data, str):
+            await ctx.reply(urban_data)
+        else:
+            urban_response = urban_data.get("list", "No definition available")
+            if urban_response:
+                definition = urban_response[0].get("definition", "No definition available")
+                example = urban_response[0].get("example", "No example available")
+                embed = discord.Embed(
+                    description=f"{definition}",
+                    color=discord.Color.from_rgb(43, 45, 49)
+                )
+                embed.add_field(name="Example", value=example, inline=False)
+                await ctx.reply(embed=embed)
+            else:
+                await ctx.reply("No definition available for the specified term.")
+
 
 async def setup(bot_instance):
     await bot_instance.add_cog(Fun(bot_instance))
-    
