@@ -41,7 +41,7 @@ class Fun(commands.Cog):
                     return f"Error fetching API.\n* **Status Code:** {response.status}"
         except aiohttp.ClientError as e:
             self.logger.error(f"Request error: {e}")
-            return f"Error fetching API. Please try again later."
+            return "Error fetching API. Please try again later."
 
     async def _process_image(self, ctx, data):
         if isinstance(data, str):
@@ -57,15 +57,26 @@ class Fun(commands.Cog):
         else:
             await ctx.reply("Unexpected response from API.")
 
+    async def _create_embed(self, description, title=None, footer=None, image_url=None, author=None):
+        embed = discord.Embed(
+            description=description,
+            color=discord.Color.from_rgb(43, 45, 49)
+        )
+        if title:
+            embed.title = title
+        if footer:
+            embed.set_footer(text=footer)
+        if image_url:
+            embed.set_image(url=image_url)
+        if author:
+            embed.set_author(name=author)
+        return embed
+
     @commands.hybrid_command(name="insult", with_app_command=True, description="Get a random insult")
     async def insult(self, ctx):
         insult_data = await self._fetch_data(self.config['INSULT_API_URL'], data_type='text')
-        if isinstance(insult_data, str):
-            embed = discord.Embed(
-                description=insult_data,
-                color=discord.Color.from_rgb(43, 45, 49)
-            )
-            await ctx.reply(embed=embed)
+        embed = await self._create_embed(insult_data)
+        await ctx.reply(embed=embed)
 
     @commands.hybrid_command(name="buzzword", with_app_command=True, description="Get a random buzzword")
     async def buzzword(self, ctx):
@@ -75,10 +86,7 @@ class Fun(commands.Cog):
         else:
             phrase = buzzword_data.get("phrase")
             if phrase:
-                embed = discord.Embed(
-                    description=phrase,
-                    color=discord.Color.from_rgb(43, 45, 49)
-                )
+                embed = await self._create_embed(phrase)
                 await ctx.reply(embed=embed)
             else:
                 await ctx.reply("Error extracting phrase from Buzzword API response.")
@@ -98,12 +106,11 @@ class Fun(commands.Cog):
                 joke = None
 
             if joke:
-                embed = discord.Embed(
-                    description=joke,
-                    color=discord.Color.from_rgb(43, 45, 49)
+                embed = await self._create_embed(
+                    joke,
+                    footer=f"Joke type: {joke_type} - This API is known to not produce very kind jokes. "
+                           f"ERM is not responsible for the content of the jokes."
                 )
-                embed.set_footer(text=f"Joke type: {joke_type} - This API is known to not produce very kind jokes. "
-                                      f"ERM is not responsible for the content of the jokes.")
                 await ctx.reply(embed=embed)
             else:
                 await ctx.reply("Error extracting joke from Joke API response.")
@@ -129,11 +136,10 @@ class Fun(commands.Cog):
             image_url = meme_data.get('url')
 
             if title and image_url:
-                embed = discord.Embed(
-                    title=title,
-                    color=discord.Color.from_rgb(43, 45, 49)
+                embed = await self._create_embed(
+                    description=title,
+                    image_url=image_url
                 )
-                embed.set_image(url=image_url)
                 await ctx.reply(embed=embed)
             else:
                 await ctx.reply("Error extracting title or image URL from Meme API response.")
@@ -143,37 +149,38 @@ class Fun(commands.Cog):
     @commands.hybrid_command(name="age", with_app_command=True, description="Get the age of a person")
     async def age(self, ctx, name):
         if name.lower() in ['noah']:
-            embed = discord.Embed(
-                title='Noah',
-                description=f"After consulting your mother, she says that Noah is "
-                            f"**69420**.",
-                color=discord.Color.from_rgb(43, 45, 49)
+            embed = await self._create_embed(
+                description="After consulting Noah's mother, she says that Noah is **69420**.",
+                title='Noah'
             )
             await ctx.reply(embed=embed)
             return
-
+    
         capitalized_name = name.capitalize()
         age_data = await self._fetch_data(f"{self.config['AGEIFY_URL']}?name={capitalized_name}")
         if isinstance(age_data, str):
             await ctx.reply(age_data)
         else:
-            age_data_response = age_data.get("age", "Age not available")
-            embed = discord.Embed(
-                title=capitalized_name,
-                description=f"After consulting your mother, she says that {capitalized_name} is "
-                            f"**{age_data_response}**.",
-                color=discord.Color.from_rgb(43, 45, 49)
-            )
+            age_data_response = age_data.get("age", None)
+            if age_data_response is None:
+                embed = await self._create_embed(
+                    description=f"Unfortunately, {capitalized_name} appears to not have an age.",
+                    title="No Age :("
+                )
+            else:
+                embed = await self._create_embed(
+                    description=f"After consulting {capitalized_name}'s mother, she says that {capitalized_name} is **{age_data_response}**.",
+                    title=capitalized_name
+                )
             await ctx.reply(embed=embed)
 
     @commands.hybrid_command(name="country", with_app_command=True, description="Get information about a country")
     async def country(self, ctx, *, country_name: str):
         if country_name.lower() in ["africa", "african"]:
-            embed = discord.Embed(
+            embed = await self._create_embed(
                 description="Africa is not a country, it's a continent..",
-                color=discord.Color.from_rgb(43, 45, 49),
+                image_url="https://media3.giphy.com/media/3o85xnoIXebk3xYx4Q/giphy.gif"
             )
-            embed.set_image(url="https://media3.giphy.com/media/3o85xnoIXebk3xYx4Q/giphy.gif")
             await ctx.reply(embed=embed)
             return
 
@@ -203,11 +210,10 @@ class Fun(commands.Cog):
             await ctx.reply(quote_data)
         else:
             quote_response = quote_data.get("value", "No quote available")
-            embed = discord.Embed(
+            embed = await self._create_embed(
                 description=quote_response,
-                color=discord.Color.from_rgb(43, 45, 49)
+                author="Donald Trump"
             )
-            embed.set_author(name="Donald Trump")
             await ctx.reply(embed=embed)
 
     @commands.hybrid_command(name="fact", with_app_command=True, description="Get a random fact")
@@ -217,10 +223,7 @@ class Fun(commands.Cog):
             await ctx.reply(fact_data)
         else:
             fact_response = fact_data.get("text", "No fact available")
-            embed = discord.Embed(
-                description=fact_response,
-                color=discord.Color.from_rgb(43, 45, 49)
-            )
+            embed = await self._create_embed(fact_response)
             await ctx.reply(embed=embed)
 
     @commands.hybrid_command(name="quote", with_app_command=True, description="Get a random quote")
@@ -231,9 +234,8 @@ class Fun(commands.Cog):
         else:
             quote_response = quote_data.get("content", "No quote available")
             quote_author = quote_data.get("author", "No author available")
-            embed = discord.Embed(
-                description=f"'{quote_response}' - {quote_author}",
-                color=discord.Color.from_rgb(43, 45, 49)
+            embed = await self._create_embed(
+                description=f"'{quote_response}' - {quote_author}"
             )
             await ctx.reply(embed=embed)
 
@@ -249,9 +251,8 @@ class Fun(commands.Cog):
             if urban_response:
                 definition = urban_response[0].get("definition", "No definition available")
                 example = urban_response[0].get("example", "No example available")
-                embed = discord.Embed(
-                    description=f"{definition}",
-                    color=discord.Color.from_rgb(43, 45, 49)
+                embed = await self._create_embed(
+                    description=definition
                 )
                 embed.add_field(name="Example", value=example, inline=False)
                 await ctx.reply(embed=embed)
